@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>バネの振動シミュレーター</title>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 20px;
+      font-family: sans-serif;
+      color: #243247;
+      background: #f5f7fb;
+    }
+
+    .app {
+      max-width: 900px;
+      margin: auto;
+    }
+
+    h1 { font-size: 24px; }
+    h2 { font-size: 18px; }
+
+    .panel {
+      background: white;
+      padding: 18px;
+      margin: 14px 0;
+      border-radius: 12px;
+      box-shadow: 0 2px 8px #0000000d;
+    }
+
+    .inputs {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    label {
+      display: block;
+      font-size: 14px;
+    }
+
+    input {
+      width: 100%;
+      margin-top: 6px;
+      padding: 9px;
+      border: 1px solid #cbd5e1;
+      border-radius: 6px;
+      font-size: 16px;
+    }
+
+    button {
+      padding: 10px 16px;
+      margin: 5px 5px 0 0;
+      border: 0;
+      border-radius: 7px;
+      cursor: pointer;
+      background: #2563eb;
+      color: white;
+      font-size: 14px;
+    }
+
+    button.secondary { background: #475569; }
+    #status { font-size: 14px; color: #475569; }
+
+    canvas { max-width: 100%; }
+
+    #springCanvas {
+      display: block;
+      width: 100%;
+      height: 230px;
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+    }
+
+    @media (max-width: 520px) {
+      body { padding: 10px; }
+      .inputs { grid-template-columns: 1fr; }
+      h1 { font-size: 21px; }
+    }
+  </style>
+</head>
+
+<body>
+<div class="app">
+  <h1>バネの減衰振動・強制振動</h1>
+  <p>各パラメータを設定し、重りの動きと変位グラフを確認します。</p>
+
+  <section class="panel">
+    <h2>1. パラメータ設定</h2>
+    <div class="inputs">
+      <label>質量 m [kg]
+        <input id="mass" type="number" min="0.001"
+          step="0.01" value="0.1">
+      </label>
+
+      <label>バネ定数 k [N/m]
+        <input id="stiffness" type="number" min="0.01"
+          step="1" value="50">
+      </label>
+
+      <label>外力の振幅 f [N]
+        <input id="force" type="number"
+          step="10" value="0">
+      </label>
+
+      <label>減衰係数 a [kg/s]
+        <input id="damping" type="number" min="0"
+          step="0.1" value="0">
+      </label>
+
+      <label>外力の角周波数 ω₀ [rad/s]
+        <input id="frequency" type="number" min="0"
+          step="0.1" value="22.36068">
+      </label>
+
+      <label>初期変位 x₀ [m]
+        <input id="initialX" type="number"
+          step="0.05" value="-0.2">
+      </label>
+
+      <label>初期速度 v₀ [m/s]
+        <input id="initialV" type="number"
+          step="0.1" value="0">
+      </label>
+
+      <label>計算時間 [s]
+        <input id="duration" type="number" min="0.1"
+          max="300" step="1" value="20">
+      </label>
+    </div>
+
+    <button id="startButton">計算・再生</button>
+    <button id="pauseButton" class="secondary">一時停止</button>
+    <button id="resetButton" class="secondary">リセット</button>
+    <p id="status">計算前です。</p>
+  </section>
+
+  <section class="panel">
+    <h2>2. バネと重りの動き</h2>
+    <canvas id="springCanvas" height="230"></canvas>
+  </section>
+
+  <section class="panel">
+    <h2>3. 変位と時間の関係</h2>
+    <canvas id="chartCanvas"></canvas>
+  </section>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+
+  const springCanvas = $("springCanvas");
+  const ctx = springCanvas.getContext("2d");
+
+  let samples = [];
+  let chart = null;
+  let playing = false;
+  let elapsed = 0;
+  let lastFrame = 0;
+  let animationId = null;
+  let sim = null;
+
+  // 運動方程式の右辺
+  function derivative(state, t, p) {
+    return {
+      x: state.v,
+      v: -(p.k / p.m) * state.x
+         + (p.f / p.m) * Math.cos(p.w0 * t)
+         - (p.a / p.m) * state.v
+    };
+  }
+
+  // 4次の Runge-Kutta 法
+  function rk4(state, t, dt, p) {
+    const add = (s, d, h) => ({
+      x: s.x + h * d.x,
+      v: s.v + h * d.v
+    });
+
+    const k1 = derivative(state, t, p);
+    const k2 = derivative(add(state, k1, dt / 2),
+                          t + dt / 2, p);
+    const k3 = derivative(add(state, k2, dt / 2),
+                          t + dt / 2, p);
+    const k4 = derivative(add(state, k3, dt),
+                          t + dt, p);
+
+    return {
+      x: state.x + dt / 6 *
+        (k1.x + 2*k2.x + 2*k3.x + k4.x),
+      v: state.v + dt / 6 *
+        (k1.v + 2*k2.v + 2*k3.v + k4.v)
+    };
+  }
+
+  function readParameters() {
+    const p = {
+      m: Number($("mass").value),
+      k: Number($("stiffness").value),
+      f: Number($("force").value),
+      a: Number($("damping").value),
+      w0: Number($("frequency").value),
+      x0: Number($("initialX").value),
+      v0: Number($("initialV").value),
+      duration: Number($("duration").value)
+    };
+
+    if (
+      !Object.values(p).every(Number.isFinite) ||
+      p.m <= 0 || p.k <= 0 || p.a < 0 ||
+      p.w0 < 0 || p.duration <= 0 ||
+      p.duration > 300
+    ) {
+      throw new Error("入力値を確認してください。質量・バネ定数は正の値、減衰係数は0以上にしてください。");
+    }
+
+    return p;
+  }
+
+  function calculate() {
+    sim = readParameters();
+
+    const dt = 0.005;
+    const count = Math.ceil(sim.duration / dt);
+    let state = { x: sim.x0, v: sim.v0 };
+
+    samples = [{ t: 0, x: state.x, v: state.v }];
+
+    for (let i = 1; i <= count; i++) {
+      const t = (i - 1) * dt;
+      const h = Math.min(dt, sim.duration - t);
+
+      state = rk4(state, t, h, sim);
+
+      if (!Number.isFinite(state.x) ||
+          !Number.isFinite(state.v)) {
+        throw new Error("計算値が不安定になりました。入力値や計算条件を確認してください。");
+      }
+
+      samples.push({
+        t: Math.min(i * dt, sim.duration),
+        x: state.x,
+        v: state.v
+      });
+    }
+
+    elapsed = 0;
+    drawChart();
+    drawSpring(samples[0].x);
+    $("status").textContent =
+      `計算完了：${samples.length} 点、時間 ${sim.duration} 秒`;
+  }
+
+  function drawChart() {
+    if (chart) chart.destroy();
+
+    chart = new Chart($("chartCanvas"), {
+      type: "line",
+      data: {
+        datasets: [{
+          label: "変位 x [m]",
+          data: samples.map(s => ({ x: s.t, y: s.x })),
+          borderColor: "#2563eb",
+          borderWidth: 2,
+          pointRadius: 0,
+          tension: 0
+        }]
+      },
+      options: {
+        responsive: true,
+        animation: false,
+        parsing: false,
+        scales: {
+          x: {
+            type: "linear",
+            title: { display: true, text: "時間 t [s]" }
+          },
+          y: {
+            title: { display: true, text: "変位 x [m]" }
+          }
+        }
+      }
+    });
+  }
+
+  function drawSpring(x) {
+    const rect = springCanvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.max(1, rect.width);
+    const h = 230;
+
+    springCanvas.width = Math.round(w * dpr);
+    springCanvas.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    const center = w / 2;
+    const wallY = 32;
+    const equilibriumY = 150;
+    const scale = Math.min(220, w * 0.8);
+    const massY = equilibriumY - x * scale;
+    const massSize = 32;
+
+    // 固定壁
+    ctx.fillStyle = "#94a3b8";
+    ctx.fillRect(center - 65, wallY, 130, 8);
+
+    // バネ
+    const top = wallY + 8;
+    const bottom = massY - massSize / 2;
+    const coils = 12;
+    const amplitude = 12;
+    ctx.beginPath();
+    ctx.moveTo(center, top);
+
+    for (let i = 1; i <= coils; i++) {
+      const yy = top + (bottom - top) * i / (coils + 1);
+      const xx = center + (i % 2 ? amplitude : -amplitude);
+      ctx.lineTo(xx, yy);
+    }
+
+    ctx.lineTo(center, bottom);
+    ctx.strokeStyle = "#64748b";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // 平衡位置
+    ctx.setLineDash([5, 5]);
+    ctx.beginPath();
+    ctx.moveTo(20, equilibriumY);
+    ctx.lineTo(w - 20, equilibriumY);
+    ctx.strokeStyle = "#cbd5e1";
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 重り
+    ctx.fillStyle = "#60a5fa";
+    ctx.fillRect(center - 28, massY - massSize / 2,
+                 56, massSize);
+    ctx.strokeStyle = "#1d4ed8";
+    ctx.strokeRect(center - 28, massY - massSize / 2,
+                   56, massSize);
+
+    ctx.fillStyle = "#1e293b";
+    ctx.font = "13px sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText(`変位: ${x.toFixed(3)} m`, 12, 18);
+    ctx.fillText("平衡位置", 12, equilibriumY + 18);
+  }
+
+  function frame(timestamp) {
+    if (!playing) return;
+
+    if (!lastFrame) lastFrame = timestamp;
+    const delta = (timestamp - lastFrame) / 1000;
+    lastFrame = timestamp;
+
+    // 実時間より少し速い程度で再生
+    elapsed += delta;
+
+    if (elapsed >= sim.duration) {
+      elapsed = sim.duration;
+      playing = false;
+    }
+
+    const index = Math.min(
+      Math.floor(elapsed / sim.duration *
+        (samples.length - 1)),
+      samples.length - 1
+    );
+
+    drawSpring(samples[index].x);
+    $("status").textContent =
+      `再生中：${elapsed.toFixed(2)} / ${sim.duration} 秒`;
+
+    if (playing) {
+      animationId = requestAnimationFrame(frame);
+    } else {
+      $("status").textContent =
+        `再生終了：${sim.duration} 秒`;
+    }
+  }
+
+  function stop() {
+    playing = false;
+    if (animationId !== null) {
+      cancelAnimationFrame(animationId);
+      animationId = null;
+    }
+    lastFrame = 0;
+  }
+
+  $("startButton").addEventListener("click", () => {
+    try {
+      stop();
+      calculate();
+      playing = true;
+      lastFrame = 0;
+      animationId = requestAnimationFrame(frame);
+    } catch (error) {
+      $("status").textContent = error.message;
+    }
+  });
+
+  $("pauseButton").addEventListener("click", () => {
+    stop();
+    $("status").textContent =
+      `一時停止：${elapsed.toFixed(2)} 秒`;
+  });
+
+  $("resetButton").addEventListener("click", () => {
+    stop();
+    elapsed = 0;
+
+    if (samples.length) {
+      drawSpring(samples[0].x);
+      $("status").textContent = "初期位置に戻しました。";
+    } else {
+      drawSpring(0);
+      $("status").textContent = "計算前です。";
+    }
+  });
+
+  // 初期表示
+  drawSpring(-0.2);
+})();
+</script>
+</body>
+</html>
